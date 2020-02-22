@@ -2,9 +2,13 @@ var APP_NAME="GS2S"
 
 const GS_SHEET_NAME='scores (from Gradescope)';
 const GS_FIRSTNAME_COLUMN=1;
+const GS_FIRSTNAME_COLUMN_NAME="First Name";
 const GS_LASTNAME_COLUMN=2;
+const GS_LASTNAME_COLUMN_NAME="Last Name";
 const GS_SID_COLUMN=3;
+const GS_SID_COLUMN_NAME="SID";
 const GS_SCORE_COLUMN=6;
+const GS_SCORE_COLUMN_NAME="Total Score";
 const SK_SHEET_NAME='To Sakai';
 const SK_SID_COLUMN=1;
 const SK_SID_COLUMN_NAME='Student ID';
@@ -27,76 +31,162 @@ function onOpen() {
       ui.alert("Not implemented yet");
   }
 
-  /**
-   * Get the maximum point value from the Gradescope assignment sheet
-   * 
-   * @param {Sheet} sheet 
-   * @returns number
-   */
-  function getMaxPoints(sheet) {
-    var ui = SpreadsheetApp.getUi();
-    var j=1; 
-    var tot=0;
-    var regex = /\((\d+\.\d+) pts\)/;
 
-    while (!sheet.getRange(1,++j).isBlank()) {
-     if(m = regex.exec(sheet.getRange(1,j).getValue())) {
+/**
+ * Read assignment data from a Gradescope spreadsheet
+ *
+ * The return value has properties "name", "maxPoints", and "records".  
+ * The "records" property is an array of objects.  Each one has properties
+ * "firstName", "lastName", "sid", and "totalPoints".
+ *
+ * @param {SpreadSheet} sheet 
+ * @return {Object}
+ */
+function readGradescopeSheet(sheet) {
+    if (! isGradescopeSheet(sheet)) {
+        throw new Error("not a Gradescope score sheet");
+    }
+    var data = sheet.getDataRange().getValues();
+    var assignment = {};
+    assignment.name = nameFromGradescopeSheet(sheet);
+    var headers = data.shift();
+    assignment.maxPoints = sumPoints(headers);
+    assignment.records = [];
+    for (const row of data) {
+        // Logger.log("readData:row: " + row);
+        var record = {};
+        row.unshift(""); // spreadsheet column numbers start with 1
+        record.firstName = row[GS_FIRSTNAME_COLUMN];
+        record.lastName = row[GS_LASTNAME_COLUMN];
+        record.sid = row[GS_SID_COLUMN];
+        record.totalPoints = row[GS_SCORE_COLUMN];
+        // Logger.log("readData:record: " + record);
+        assignment.records.push(record);
+    }
+    return assignment;
+}
+
+/**
+ * Decide if a sheet “looks like” a Gradescope score sheet.
+ *
+ * Checks the header row and matches the fields with expected ones.
+ *
+ * @param {SpreadSheet} sheet 
+ * @returns {boolean}
+ */
+function isGradescopeSheet(sheet) {
+    var data = sheet.getDataRange().getValues();
+    var header = data.shift();
+    header.unshift("");
+    return (header[GS_FIRSTNAME_COLUMN] == GS_FIRSTNAME_COLUMN_NAME)
+        && (header[GS_LASTNAME_COLUMN] == GS_LASTNAME_COLUMN_NAME)
+        && (header[GS_SID_COLUMN] == GS_SID_COLUMN_NAME)
+        && (header[GS_SCORE_COLUMN] == GS_SCORE_COLUMN_NAME);
+}
+
+/**
+ * Parse the name of the assignment from a Gradescope score sheet.
+ *
+ * For example, when exporting an assignemnt named "HW 02", the exported file is
+ * named "HW_02_scores.csv".  When imported to Google Spreadheets, the extension
+ * is cut off.  This function will strip off "_scores.csv", replace the
+ * underscore, and return "HW 02".
+ *
+ * @param {*} sheet 
+ * @returns {string} the name
+ */
+function nameFromGradescopeSheet(sheet) {
+    var regex = /(.*)_scores.*/;
+    var sheetName = sheet.getName();
+    var name = "Assignment"; // default value
+    if (m = regex.exec(sheetName)) {
+        name = m[1].replace("_"," ");
+    }
+    return name;
+}
+
+
+/**
+ * Scan field names and sum up point values.
+ * @param {array} fields 
+ */
+function sumPoints(fields) {
+    var regex = /\((\d+\.\d+) pts\)/;
+    var tot=0;
+
+    for (const field of fields) {
+        if (m = regex.exec(field)) {
             tot += Number(m[1]);
         }
     }
     return tot;
 }
 
-  /**
-   * rescale the values in the Gradescope report
-   */
-  function rescale() {
-    // TODO: get from a dialog
-    var assignmentName = 'Assignment';
+/**
+ * process an assignment, rescaling the total
+ * 
+ * @param {Assignment} assignment 
+ */
+function process(assignment) {
     var newMaxPoints = 100;
+    for (i in assignment.records) {
+        record = assignment.records[i];
+        record.formattedName = record.lastName + ", " + record.firstName;
+        record.comment = "";
+        if (record.totalPoints == assignment.maxPoints) {
+            record.comment += SK_MSG_KUDOS;
+        }
+        record.totalPoints *= newMaxPoints/assignment.maxPoints;
+    }
+    assignment.maxPoints = newMaxPoints;
+}
+
+/**
+ * Get a new sheet with name "name", deleting any existing sheet
+ * 
+ * @param {SpreadSheet} spreadSheet
+ * @param {string} name 
+ * @returns {Sheet}
+ */
+function getCleanSheet(spreadSheet, name) {
+    var sheet = spreadSheet.getSheetByName(name);
+    if (sheet) {
+        spreadSheet.deleteSheet(sheet);
+    }
+    return spreadSheet.insertSheet(name);
+}
+
+
+function writeSakaiSheet(sheet,assignment) {
+    var headers = [
+        SK_SID_COLUMN_NAME,
+        SK_NAME_COLUMN_NAME,
+        assignment.name + " [" + assignment.maxPoints + "]",
+        "* " + assignment.name
+    ];
+    var rows = [];
+    rows.push(headers);
+    for (const record of assignment.records) {
+        rows.push(["'" + record.sid,record.formattedName,record.totalPoints,record.comment]);
+    }
+    sheet.getRange(1,1,rows.length,rows[0].length).setValues(rows)
+}
+
+
+/**
+ * rescale the values in the Gradescope report
+ */
+function rescale() {
 
     var ui = SpreadsheetApp.getUi();
     var ss = SpreadsheetApp.getActiveSpreadsheet();
+    var gs = SpreadsheetApp.getActiveSheet();
 
-    var gs = ss.getSheetByName(GS_SHEET_NAME);
-    var oldMaxPoints = getMaxPoints(gs);
-    var oldScore,newScore;
+    assignment = readGradescopeSheet(gs);
+    process(assignment);
 
-    var s=ss.getSheetByName(SK_SHEET_NAME);
-    if (s) {
-        ss.deleteSheet(s);
-    }
-    s = ss.insertSheet(SK_SHEET_NAME);
-
-    // header row
-    s.getRange(1,SK_SID_COLUMN).setValue(SK_SID_COLUMN_NAME);
-    s.getRange(1,SK_NAME_COLUMN).setValue(SK_NAME_COLUMN_NAME);
-    s.getRange(1,SK_SCORE_COLUMN).setValue(assignmentName + " [" + newMaxPoints + "]");
-    s.getRange(1,SK_COMMENT_COLUMN).setValue(" * " + assignmentName);
-
-    var i = 1; // row index
-    while (!gs.getRange(++i,1).isBlank()) {
-        // first column is the NetID (from column 3)
-        gs.getRange(i,GS_SID_COLUMN).copyTo(s.getRange(i,SK_SID_COLUMN));
-        // next column is "lastname, firstname"
-        s.getRange(i,SK_NAME_COLUMN).setValue(
-            gs.getRange(i,GS_LASTNAME_COLUMN).getValue()
-            + ", "
-            + gs.getRange(i,GS_FIRSTNAME_COLUMN).getValue()
-        );
-        // next column is score
-        oldScore = gs.getRange(i,GS_SCORE_COLUMN).getValue();
-        newScore = oldScore/oldMaxPoints*newMaxPoints;
-        s.getRange(i,SK_SCORE_COLUMN).setValue(newScore);
-        if (oldScore == oldMaxPoints) {
-            s.getRange(i,SK_COMMENT_COLUMN).setValue(SK_MSG_KUDOS);
-        }
-
-        
-    }
-
-    
-
+    var sk = getCleanSheet(ss,assignment.name + " (rescaled, for Sakai)");
+    writeSakaiSheet(sk,assignment);
 
 }
 
